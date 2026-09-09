@@ -57,6 +57,23 @@ SEND_FAILURE_MARKERS = (
     '[title*="重试"]',
     '[class*="sendFailed"]',
     '[class*="SendFailed"]',
+    '[class*="sendfail"]',
+    '[class*="msg-fail"]',
+    '[class*="MsgFail"]',
+    'svg[class*="fail"]',
+    'svg[class*="error"]',
+    'svg[class*="warning"]',
+)
+
+# 全页面级别错误提示（登录失效、风控等）
+PAGE_ERROR_MARKERS = (
+    "text=系统繁忙",
+    "text=重新登录",
+    "text=私信功能",
+    "text=操作频繁",
+    "text=账号异常",
+    "text=网络异常",
+    "text=服务器错误",
 )
 
 
@@ -240,6 +257,20 @@ async def _confirm_sticker_sent(
     await _confirm_outgoing_message(page, before, f"原生表情“{name}”", resource_key=resource_key)
 
 
+async def _check_page_errors(page: Page) -> str | None:
+    """检查全页面级别的错误提示（登录失效、风控等）。"""
+    body_text = ""
+    try:
+        body_text = (await page.locator("body").inner_text())[:2000]
+    except Exception:
+        return None
+    keywords = ["系统繁忙", "重新登录", "私信功能", "操作频繁", "账号异常"]
+    for keyword in keywords:
+        if keyword in body_text:
+            return f"页面显示错误提示: 「{keyword}」，可能登录已失效或触发风控"
+    return None
+
+
 async def _confirm_outgoing_message(
     page: Page,
     before: tuple[str, str],
@@ -248,6 +279,13 @@ async def _confirm_outgoing_message(
     expected_text: str = "",
 ) -> None:
     anchor, before_content = before
+
+    # 先等一小段时间让错误提示出现
+    await page.wait_for_timeout(2_000)
+    page_error = await _check_page_errors(page)
+    if page_error:
+        raise PageOperationError(f"{label}发送失败: {page_error}")
+
     try:
         await page.wait_for_function(
             """([selector, anchor, previousContent, expectedResource, expectedText]) => {
@@ -258,6 +296,23 @@ async def _confirm_outgoing_message(
                     message.getAttribute('data-douyin-sender-anchor') !== anchor ||
                     content.innerHTML !== previousContent;
                 if (!isNewMessage) return false;
+
+                // 检查消息内是否有失败标记（红色感叹号、重试按钮等）
+                const failSelectors = [
+                    '[class*="sendFailed"]', '[class*="SendFailed"]',
+                    '[class*="sendfail"]', '[class*="msg-fail"]',
+                    '[class*="MsgFail"]', 'svg[class*="fail"]',
+                    'svg[class*="error"]', 'svg[class*="warning"]',
+                    '[aria-label*="重试"]', '[title*="重试"]',
+                ];
+                for (const sel of failSelectors) {
+                    if (message.querySelector(sel)) return 'FAIL_DETECTED';
+                }
+                // 检查消息文本中是否包含"发送失败"
+                if (content.innerText && content.innerText.includes('发送失败')) {
+                    return 'FAIL_DETECTED';
+                }
+
                 if (expectedText) {
                     const normalize = value => (value || '').replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]+/g, ' ').trim();
                     return normalize(content.innerText).includes(normalize(expectedText));
@@ -269,12 +324,18 @@ async def _confirm_outgoing_message(
             arg=[LATEST_OUTGOING_MESSAGE, anchor, before_content, resource_key, expected_text],
             timeout=15_000,
         )
-        await page.wait_for_timeout(3_000)
+
+        # 再次检查全页面错误
+        page_error = await _check_page_errors(page)
+        if page_error:
+            raise PageOperationError(f"{label}发送失败: {page_error}")
+
+        # 检查最新消息中是否有失败标记
         latest = page.locator(LATEST_OUTGOING_MESSAGE).first
         for selector in SEND_FAILURE_MARKERS:
             marker = latest.locator(selector).first
             if await marker.count() and await marker.is_visible():
-                raise PageOperationError(f"{label}发送失败，页面提示可以重试")
+                raise PageOperationError(f"{label}发送失败，页面显示失败标记（{selector}）")
     except PageOperationError:
         raise
     except Exception as exc:
