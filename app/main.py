@@ -68,6 +68,8 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                     try:
                         LOGGER.info("处理好友: %s", alias)
                         await chat.open_target(target.name, retries=task.target_open_retries)
+                        await _screenshot(page, settings.artifacts_dir, f"{alias}-01-chat-opened")
+                        LOGGER.info("[DEBUG] 好友 %s 聊天窗口已打开，截图保存", alias)
                         if not dry_run:
                             for message_index, message in enumerate(target.messages):
                                 message_id = _message_id(message_index, message)
@@ -82,7 +84,16 @@ async def run(dry_run: bool = False, env_file: str | None = None) -> int:
                                 if task.prevent_duplicates:
                                     history.reserve(key)
                                 await verify_login(page, timeout_ms=3_000)
-                                await send_message(page, chat, message, task.stickers)
+                                await _screenshot(page, settings.artifacts_dir, f"{alias}-02-before-send")
+                                LOGGER.info("[DEBUG] 好友 %s 消息 #%d 准备发送，截图保存", alias, message_index + 1)
+                                try:
+                                    await send_message(page, chat, message, task.stickers)
+                                    await _screenshot(page, settings.artifacts_dir, f"{alias}-03-send-ok")
+                                    LOGGER.info("[DEBUG] 好友 %s 消息 #%d 发送完成，截图保存", alias, message_index + 1)
+                                except Exception as send_exc:
+                                    await _screenshot(page, settings.artifacts_dir, f"{alias}-03-send-failed")
+                                    LOGGER.exception("[DEBUG] 好友 %s 消息 #%d 发送异常，截图保存: %s", alias, message_index + 1, send_exc)
+                                    raise
                                 if task.prevent_duplicates:
                                     history.mark_success(key)
                                 sent += 1
